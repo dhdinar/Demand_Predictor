@@ -1,6 +1,38 @@
-"""Service helpers for training and serving weekly demand predictions."""
 
-from __future__ import annotations
+import pymysql
+import csv
+def export_mysql_to_csv(
+    host: str,
+    port: int,
+    dbname: str,
+    user: str,
+    password: str,
+    output_csv: str | Path,
+    sql_query: str,
+) -> None:
+    """Export query output to CSV using MySQL."""
+    conn = pymysql.connect(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        database=dbname,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql_query)
+            rows = cur.fetchall()
+            if not rows:
+                raise ValueError("No data returned from SQL query.")
+            with open(output_csv, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+    finally:
+        conn.close()
+
+"""Service helpers for training and serving weekly demand predictions."""
 
 from dataclasses import dataclass
 from datetime import datetime

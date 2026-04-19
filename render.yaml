@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: demand-prediction-api
+    env: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      python manage.py migrate
+    startCommand: gunicorn DemandPrediction.wsgi:application --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DATABASE_URL
+        value: ${DATABASE_URL}
+      - key: DEBUG
+        value: 'False'
+    autoDeploy: true
+    region: oregon
+
+# Optional: Add a background worker for scheduled tasks or batch jobs
+#  - type: worker
+#    name: demand-prediction-worker
+#    env: python
+#    plan: free
+#    buildCommand: pip install -r requirements.txt
+#    startCommand: python your_worker_script.py
