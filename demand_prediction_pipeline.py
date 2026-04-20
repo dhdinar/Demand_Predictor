@@ -49,27 +49,38 @@ def export_sql_to_csv(
     output_csv: str | Path,
     sql_path: str | Path,
 ) -> None:
-    """Export query output to CSV using PostgreSQL COPY."""
+    """Export query output to CSV using MySQL."""
     try:
-        import psycopg2
+        import pymysql
     except ImportError as exc:
         raise ImportError(
-            "psycopg2 is required for export. Install with: pip install psycopg2-binary"
+            "pymysql is required for export. Install with: pip install pymysql"
         ) from exc
 
     query = read_sql_query(sql_path).strip().rstrip(";")
-    copy_sql = f"COPY ({query}) TO STDOUT WITH CSV HEADER"
 
-    with psycopg2.connect(
+    connection = pymysql.connect(
         host=host,
-        port=port,
-        dbname=dbname,
+        port=int(port),
         user=user,
         password=password,
-    ) as conn:
-        with conn.cursor() as cur:
+        database=dbname,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if not rows:
+                raise ValueError("No data returned from SQL query.")
+            fieldnames = rows[0].keys()
             with open(output_csv, "w", encoding="utf-8", newline="") as csv_file:
-                cur.copy_expert(copy_sql, csv_file)
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+    finally:
+        connection.close()
 
 
 def load_data(csv_path: str | Path) -> List[Dict[str, Any]]:
@@ -115,8 +126,11 @@ def preprocess(
     X_raw: List[List[float]] = []
     y: List[float] = []
     for row in rows:
-        X_raw.append([float(row[col]) for col in feature_columns])
-        y.append(float(row[TARGET_COLUMN]))
+        # Clean empty strings in feature columns
+        cleaned_features = [float(row[col]) if row[col] != '' else 0.0 for col in feature_columns]
+        X_raw.append(cleaned_features)
+        y_val = float(row[TARGET_COLUMN]) if row[TARGET_COLUMN] != '' else 0.0
+        y.append(y_val)
 
     n_samples = len(X_raw)
     n_features = len(feature_columns)
@@ -265,7 +279,7 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, object]:
     print("Bias:", model_state.bias)
 
     # Example prediction using first row feature values from the dataset.
-    sample_raw = [float(rows[0][col]) for col in feature_columns]
+    sample_raw = [float(rows[0][col]) if rows[0][col] != '' else 0.0 for col in feature_columns]
     sample_pred = predict(sample_raw, model_state)[0]
     print("\nExample prediction")
     print("Input features:", dict(zip(feature_columns, sample_raw)))
@@ -292,10 +306,10 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--export-from-db", action="store_true", help="Export SQL result to CSV first")
     parser.add_argument("--db-host", type=str, default="localhost")
-    parser.add_argument("--db-port", type=int, default=5432)
-    parser.add_argument("--db-name", type=str, default="postgres")
-    parser.add_argument("--db-user", type=str, default="postgres")
-    parser.add_argument("--db-password", type=str, default="postgres")
+    parser.add_argument("--db-port", type=int, default=3306)
+    parser.add_argument("--db-name", type=str, default="tumii")
+    parser.add_argument("--db-user", type=str, default="root")
+    parser.add_argument("--db-password", type=str, default="")
 
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--epochs", type=int, default=1000)
@@ -311,4 +325,24 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     cli_args = parse_args()
+
+    # --- MySQL connection test for debugging ---
+    try:
+        import pymysql
+        print(f"[DEBUG] Testing MySQL connection to {cli_args.db_host}:{cli_args.db_port} as {cli_args.db_user}...")
+        conn = pymysql.connect(
+            host=cli_args.db_host,
+            port=int(cli_args.db_port),
+            user=cli_args.db_user,
+            password=cli_args.db_password,
+            database=cli_args.db_name,
+            connect_timeout=5
+        )
+        conn.close()
+        print("[DEBUG] MySQL connection successful!")
+    except Exception as e:
+        print(f"[ERROR] MySQL connection failed: {type(e).__name__}: {e}")
+        import sys
+        sys.exit(1)
+
     run_pipeline(cli_args)

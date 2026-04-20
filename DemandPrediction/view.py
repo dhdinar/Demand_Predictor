@@ -47,7 +47,6 @@ def model_info(request: HttpRequest) -> JsonResponse:
         )
     except ValueError as exc:
         return JsonResponse({"status": "error", "message": str(exc)}, status=400)
-
     return JsonResponse(
         {
             "status": "ok",
@@ -87,11 +86,21 @@ def weekly_prediction(request: HttpRequest) -> JsonResponse:
         with open(sql_path, "r", encoding="utf-8") as f:
             sql_query = f.read()
 
-        # Filter for product_ids and current week only
-        from datetime import date
-        current_week = date.today().strftime("%Y-%m-%d")
-        sql_query += f"\nWHERE product_id IN ({','.join(str(int(pid)) for pid in product_ids)})"
-        sql_query += f" AND week = '{current_week}'"
+        # Strip trailing semicolon and ORDER BY, inject WHERE, then re-add ORDER BY
+        from datetime import date, timedelta
+        today = date.today()
+        current_week = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+
+        sql_query = sql_query.strip().rstrip(";")
+
+        # Remove the final ORDER BY line so we can inject WHERE before it
+        order_by_clause = "ORDER BY t.product_id, t.week"
+        if order_by_clause in sql_query:
+            sql_query = sql_query[:sql_query.rfind(order_by_clause)].rstrip()
+
+        ids_str = ','.join(str(int(pid)) for pid in product_ids)
+        sql_query += f"\nWHERE t.product_id IN ({ids_str})"
+        sql_query += f"\nORDER BY t.product_id, t.week"
 
         csv_path = payload.get("csv_path") or "data.csv"
         export_mysql_to_csv(
@@ -104,6 +113,55 @@ def weekly_prediction(request: HttpRequest) -> JsonResponse:
             sql_query=sql_query,
         )
 
+        # Clean empty strings to 0 in CSV before training
+        import csv as pycsv
+        cleaned_rows = []
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = pycsv.DictReader(f)
+            fieldnames = reader.fieldnames
+            for row in reader:
+                cleaned_row = {k: (v if v != '' else '0') for k, v in row.items()}
+                cleaned_rows.append(cleaned_row)
+
+        if fieldnames is not None:
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                writer = pycsv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(cleaned_rows)
+        else:
+            # If no fieldnames, just clear the file
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                pass
+
+
+
+        # Debug: Read the exported CSV and print some info (optional, can be removed later)
+        import csv as pycsv
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = pycsv.DictReader(f)
+            rows_debug = list(reader)
+            print(f"[DEBUG] CSV rows count: {len(rows_debug)}")
+            if rows_debug:
+                print(f"[DEBUG] First row: {rows_debug[0]}")
+                print(f"[DEBUG] Unique weeks: {set(r['week'] for r in rows_debug)}")
+                print(f"[DEBUG] Unique product_ids: {set(r['product_id'] for r in rows_debug)}")
+
+
+
+        print(f"[DEBUG] About to train model...")
+        try:
+            cached = get_or_train_model(
+                csv_path=csv_path,
+                learning_rate=float(payload.get("learning_rate", 0.01)),
+                epochs=int(payload.get("epochs", 1000)),
+                use_rolling_feature=bool(payload.get("use_rolling_feature", False)),
+                retrain=bool(payload.get("retrain", False)),
+            )
+            print(f"[DEBUG] Model trained OK")
+        except Exception as e:
+            print(f"[DEBUG] get_or_train_model FAILED: {type(e).__name__}: {e}")
+            raise
+
         cached = get_or_train_model(
             csv_path=csv_path,
             learning_rate=float(payload.get("learning_rate", 0.01)),
@@ -113,17 +171,47 @@ def weekly_prediction(request: HttpRequest) -> JsonResponse:
         )
 
         # Load the just-exported CSV and filter for current week and product_ids
-        import csv as pycsv
-        weekly_data = []
+        # weekly_data = []
+        # with open(csv_path, "r", encoding="utf-8") as f:
+        #     reader = pycsv.DictReader(f)
+        #     for row in reader:
+        #         if int(row["product_id"]) in product_ids:
+        #             weekly_data.append(row)
+        # if not weekly_data:
+        #     raise ValueError("No data found for the given product_ids and current week.")
+        
+        latest_rows = {}
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = pycsv.DictReader(f)
             for row in reader:
-                if int(row["product_id"]) in product_ids:
-                    weekly_data.append(row)
+                pid = int(row["product_id"])
+                if pid in product_ids:
+                    existing = latest_rows.get(pid)
+                    if existing is None or row["week"] > existing["week"]:
+                        latest_rows[pid] = row
+
+        
+        weekly_data = list(latest_rows.values())
         if not weekly_data:
-            raise ValueError("No data found for the given product_ids and current week.")
+            raise ValueError("No data found for the given product_ids.")
+        
+
+        print(f"[DEBUG weekly_data] {weekly_data}")
+        print(f"[DEBUG feature_names] {cached.model_state.feature_names}")
 
         predictions: List[Dict[str, Any]] = predict_weekly_rows(cached, weekly_data)
+
+        return JsonResponse(
+            {
+                "status": "ok",
+                "model": {
+                    "trained_at": cached.trained_at,
+                    "feature_names": cached.model_state.feature_names,
+                    "final_loss": round(cached.final_loss, 6),
+                },
+                "predictions": predictions,
+            }
+        )
     except ValueError as exc:
         return JsonResponse({"status": "error", "message": str(exc)}, status=400)
     except Exception as exc:
@@ -131,15 +219,3 @@ def weekly_prediction(request: HttpRequest) -> JsonResponse:
             {"status": "error", "message": f"Internal server error: {exc}"},
             status=500,
         )
-
-    return JsonResponse(
-        {
-            "status": "ok",
-            "model": {
-                "trained_at": cached.trained_at,
-                "feature_names": cached.model_state.feature_names,
-                "final_loss": round(cached.final_loss, 6),
-            },
-            "predictions": predictions,
-        }
-    )

@@ -155,7 +155,8 @@ def predict_weekly_rows(
         if missing:
             raise ValueError(f"Missing feature(s) in input row: {missing}")
 
-        vector = [float(item[name]) for name in feature_names]
+        #vector = [float(item[name]) for name in feature_names]
+        vector = [float(item[name]) if item[name] != '' else 0.0 for name in feature_names]
         y_hat = predict(vector, cached_model.model_state)[0]
         outputs.append(
             {
